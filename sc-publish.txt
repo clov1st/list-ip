@@ -1,0 +1,144 @@
+<!-- IP Blacklist Redirect - FORCE NO-CACHE + RAW cache-bust (SILENT) -->
+<div style="display:none" aria-hidden="true"></div>
+<script>
+(function () {
+  "use strict";
+
+  /* ===== CONFIG (ubah sesuai kebutuhan) ===== */
+  const GITHUB_TXT_URL_BASE = "https://raw.githubusercontent.com/clov1st/list-ip/refs/heads/main/ip.txt"; // RAW GitHub (bukan /blob/)
+  const TARGET_URL          = "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQSkzWcW130Oz_hnqHYhBsdFvrRBbHBHspv0V-vJRD7OAnAPOACAnheJALU&s=10";   // redirect tujuan jika IP masuk blacklist
+  const FORWARD_QUERY       = true;                   // bawa query string halaman saat ini ke TARGET_URL
+  const CACHE_TTL_MS        = 0;                      // 0 = nonaktif cache localStorage
+  const FETCH_TIMEOUT       = 10000;                  // timeout fetch (ms)
+  /* ========================================= */
+
+  // abortable fetch
+  function afetch(url, opts = {}, ms = FETCH_TIMEOUT) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), ms);
+    return fetch(url, { ...opts, signal: ctrl.signal }).finally(() => clearTimeout(t));
+  }
+
+  // normalize IPv6-mapped
+  const normIP = (ip) => (ip || "").trim().replace(/^::ffff:/, "");
+
+  // cache helpers (silent)
+  const LS_KEY = "ip_blacklist_cache_force_v1";
+  function loadCache() {
+    if (!CACHE_TTL_MS) return null;
+    try {
+      const raw = localStorage.getItem(LS_KEY);
+      if (!raw) return null;
+      const obj = JSON.parse(raw);
+      if (!obj || !obj.expire || Date.now() > obj.expire) return null;
+      const d = obj.data || {};
+      return {
+        pure: new Set(d.pure || []),
+        cidr24: Array.isArray(d.cidr24) ? d.cidr24 : [],
+        cidr16: Array.isArray(d.cidr16) ? d.cidr16 : []
+      };
+    } catch { return null; }
+  }
+  function saveCache(list) {
+    if (!CACHE_TTL_MS) return;
+    try {
+      const payload = {
+        pure: Array.from(list.pure || []),
+        cidr24: list.cidr24 || [],
+        cidr16: list.cidr16 || []
+      };
+      localStorage.setItem(LS_KEY, JSON.stringify({
+        expire: Date.now() + CACHE_TTL_MS,
+        data: payload
+      }));
+    } catch {}
+  }
+
+  // parse list
+  function parseList(text) {
+    const lines = text.split(/\r?\n/).map(l => l.split("#")[0].trim()).filter(Boolean);
+    const pure = new Set(), cidr24 = [], cidr16 = [];
+    for (const line of lines) {
+      const m = line.match(/^(\d{1,3}(?:\.\d{1,3}){3})(?:\/(16|24|32))?$/);
+      if (!m) continue;
+      const ip = m[1], mask = m[2] || "32";
+      if (mask === "32") pure.add(ip);
+      else if (mask === "24") cidr24.push(ip.split(".").slice(0,3).join(".") + ".");
+      else if (mask === "16") cidr16.push(ip.split(".").slice(0,2).join(".") + ".");
+    }
+    return { pure, cidr24: Array.from(new Set(cidr24)), cidr16: Array.from(new Set(cidr16)) };
+  }
+
+  // match logic
+  function isBlacklisted(ip, list) {
+    if (!ip || !list) return false;
+    if (list.pure.has(ip)) return true;
+    if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(ip)) return false;
+    if (list.cidr24.some(p => ip.startsWith(p))) return true;
+    if (list.cidr16.some(p => ip.startsWith(p))) return true;
+    return false;
+  }
+
+  // merge querystring
+  function mergeQuery(targetUrl) {
+    if (!FORWARD_QUERY) return targetUrl;
+    try {
+      const src = new URL(window.location.href);
+      const tgt = new URL(targetUrl, window.location.href);
+      src.searchParams.forEach((v,k) => { if (!tgt.searchParams.has(k)) tgt.searchParams.set(k, v); });
+      return tgt.toString();
+    } catch { return targetUrl; }
+  }
+
+  // cache-busted RAW URL
+  function rawUrl() {
+    return GITHUB_TXT_URL_BASE + (GITHUB_TXT_URL_BASE.includes('?') ? '&' : '?') + '_=' + Date.now();
+  }
+
+  async function getBlacklist() {
+    if (CACHE_TTL_MS) {
+      const cached = loadCache();
+      if (cached) return cached;
+    }
+    const res = await afetch(rawUrl(), { cache: "no-store" });
+    if (!res.ok) throw new Error("fetch blacklist " + res.status);
+    const txt = await res.text();
+    const parsed = parseList(txt);
+    saveCache(parsed);
+    return parsed;
+  }
+
+  // IP resolver (with fallback)
+  async function getPublicIP() {
+    try {
+      const r1 = await afetch("https://api.ipify.org?format=json", { cache: "no-store" });
+      if (r1.ok) { const d = await r1.json(); return normIP(d.ip); }
+      throw new Error("ipify non-200");
+    } catch {
+      const r2 = await afetch("https://ifconfig.co/json", { cache: "no-store", headers: { "Accept": "application/json" } });
+      if (!r2.ok) throw new Error("ifconfig.co non-200");
+      const d2 = await r2.json();
+      return normIP(d2.ip);
+    }
+  }
+
+  async function run() {
+    try {
+      const [list, ip] = await Promise.all([getBlacklist(), getPublicIP()]);
+      const blocked = isBlacklisted(ip, list);
+      if (!blocked) return;
+
+      const dest = mergeQuery(TARGET_URL);
+      const here = location.href.split("#")[0];
+      const there = dest.split("#")[0];
+      if (here !== there) window.location.replace(dest);
+    } catch { /* silent */ }
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", run);
+  } else {
+    run();
+  }
+})();
+</script>
