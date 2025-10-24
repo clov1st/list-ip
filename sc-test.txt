@@ -1,0 +1,247 @@
+<!-- IP Blacklist Redirect - FORCE NO-CACHE + RAW cache-bust
+     Paste this whole block into Elementor -> HTML widget -->
+<div style="display:none" aria-hidden="true"></div>
+<script>
+(function () {
+  "use strict";
+
+  /* ===================== CONFIG ===================== */
+  // RAW GitHub base (pastikan raw.githubusercontent.com)
+  const GITHUB_TXT_URL_BASE = "https://raw.githubusercontent.com/clov1st/list-ip/refs/heads/main/ip.txt";
+  // Redirect target when IP IS in blacklist
+  const TARGET_URL = "https://google.com";
+  // forward query string from current page to target if true
+  const FORWARD_QUERY = true;
+  // cache TTL: 0 = disable localStorage cache (force network). Set >0 to enable caching ms.
+  const CACHE_TTL_MS = 0;
+  // fetch timeout in ms
+  const FETCH_TIMEOUT = 10000;
+  // debug panel: set false to hide the floating debug box (console logs still printed)
+  const DEBUG = true;
+  /* ================================================= */
+
+  // ---- debug UI & logger ----
+  let dbgPre = null;
+  function ensureDebugPanel() {
+    if (!DEBUG) return;
+    if (dbgPre) return;
+    dbgPre = document.createElement("pre");
+    dbgPre.id = "ip-blacklist-debug";
+    dbgPre.style.cssText = "position:fixed;z-index:2147483647;bottom:8px;right:8px;max-width:48vw;max-height:40vh;overflow:auto;background:rgba(0,0,0,.8);color:#b5f5b3;padding:10px 12px;border-radius:8px;font:12px/1.45 Consolas,Monaco,monospace;white-space:pre-wrap;box-shadow:0 6px 18px rgba(0,0,0,.35)";
+    dbgPre.setAttribute("aria-label","IP Blacklist Debug");
+    document.body.appendChild(dbgPre);
+  }
+  function print(line, obj) {
+    const time = new Date().toISOString();
+    const msg = `[IP-BLACKLIST][${time}] ${line}`;
+    try { console.log(msg, (obj !== undefined ? obj : '')); } catch(e){}
+    if (DEBUG) {
+      ensureDebugPanel();
+      try {
+        const s = (obj === undefined || obj === null) ? "" :
+          ((typeof obj === "string") ? obj :
+          (obj instanceof Error) ? (obj.stack || obj.message) :
+          JSON.stringify(obj, null, 2));
+        dbgPre.textContent += msg + (s ? ("\n" + s) : "") + "\n";
+      } catch(e){}
+    }
+  }
+  // required signature log line (always printed)
+  function printSignatureBlock(statusText) {
+    const line = "log from script blocked ip : \n" + statusText;
+    try { console.log(line); } catch(e){}
+    if (DEBUG) {
+      ensureDebugPanel();
+      try { dbgPre.textContent += line + "\n"; } catch(e){}
+    }
+  }
+
+  // ---- abortable fetch helper ----
+  function afetch(url, opts = {}, ms = FETCH_TIMEOUT) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), ms);
+    return fetch(url, { ...opts, signal: ctrl.signal }).finally(() => clearTimeout(t));
+  }
+
+  // normalize IPv6-mapped addresses
+  const normIP = (ip) => (ip || "").trim().replace(/^::ffff:/, "");
+
+  // ---- localStorage cache helpers (serializable) ----
+  const LS_KEY = "ip_blacklist_cache_force_v1";
+  function loadCache() {
+    if (!CACHE_TTL_MS) return null;
+    try {
+      const raw = localStorage.getItem(LS_KEY);
+      if (!raw) return null;
+      const obj = JSON.parse(raw);
+      if (!obj || !obj.expire || Date.now() > obj.expire) return null;
+      const d = obj.data || {};
+      return {
+        pure: new Set(d.pure || []),
+        cidr24: Array.isArray(d.cidr24) ? d.cidr24 : [],
+        cidr16: Array.isArray(d.cidr16) ? d.cidr16 : []
+      };
+    } catch (e) {
+      print("Cache load error", e);
+      return null;
+    }
+  }
+  function saveCache(list) {
+    if (!CACHE_TTL_MS) return;
+    try {
+      const payload = {
+        pure: Array.from(list.pure || []),
+        cidr24: list.cidr24 || [],
+        cidr16: list.cidr16 || []
+      };
+      localStorage.setItem(LS_KEY, JSON.stringify({
+        expire: Date.now() + CACHE_TTL_MS,
+        data: payload
+      }));
+    } catch (e) {
+      print("Cache save error", e);
+    }
+  }
+
+  // ---- parse allowlist text into structured object ----
+  function parseList(text) {
+    const lines = text.split(/\r?\n/).map(l => l.split("#")[0].trim()).filter(Boolean);
+    const pure = new Set();
+    const cidr24 = [];
+    const cidr16 = [];
+    for (const line of lines) {
+      const m = line.match(/^(\d{1,3}(?:\.\d{1,3}){3})(?:\/(16|24|32))?$/);
+      if (!m) continue;
+      const ip = m[1], mask = m[2] || "32";
+      if (mask === "32") pure.add(ip);
+      else if (mask === "24") cidr24.push(ip.split(".").slice(0,3).join(".") + ".");
+      else if (mask === "16") cidr16.push(ip.split(".").slice(0,2).join(".") + ".");
+    }
+    return { pure, cidr24: Array.from(new Set(cidr24)), cidr16: Array.from(new Set(cidr16)) };
+  }
+
+  // ---- matching logic ----
+  function isBlacklisted(ip, list) {
+    if (!ip || !list) return false;
+    if (list.pure.has(ip)) return true;
+    if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(ip)) return false;
+    if (list.cidr24.some(p => ip.startsWith(p))) return true;
+    if (list.cidr16.some(p => ip.startsWith(p))) return true;
+    return false;
+  }
+
+  // ---- merge querystring from current location to target URL ----
+  function mergeQuery(targetUrl) {
+    if (!FORWARD_QUERY) return targetUrl;
+    try {
+      const src = new URL(window.location.href);
+      const tgt = new URL(targetUrl, window.location.href);
+      src.searchParams.forEach((v,k) => { if (!tgt.searchParams.has(k)) tgt.searchParams.set(k, v); });
+      return tgt.toString();
+    } catch (e) {
+      return targetUrl;
+    }
+  }
+
+  // ---- build cache-busted raw URL ----
+  function rawUrl() {
+    // append timestamp to force fresh raw fetch
+    return GITHUB_TXT_URL_BASE + (GITHUB_TXT_URL_BASE.includes('?') ? '&' : '?') + '_=' + Date.now();
+  }
+
+  // ---- fetch blacklist (cache optional) ----
+  async function getBlacklist() {
+    // try local cache if enabled
+    if (CACHE_TTL_MS) {
+      const cached = loadCache();
+      if (cached) {
+        print("Using cached blacklist", { pure_count: cached.pure.size, cidr24_count: cached.cidr24.length, cidr16_count: cached.cidr16.length });
+        return cached;
+      }
+    } else {
+      print("Local cache disabled (CACHE_TTL_MS=0) - forcing network fetch");
+    }
+
+    const url = rawUrl();
+    print("Fetching blacklist from GitHub RAW", { url });
+    const res = await afetch(url, { cache: "no-store" });
+    if (!res.ok) throw new Error("Failed to fetch blacklist: HTTP " + res.status);
+    const txt = await res.text();
+    const parsed = parseList(txt);
+    print("Fetched & parsed blacklist", { pure_count: parsed.pure.size, cidr24_count: parsed.cidr24.length, cidr16_count: parsed.cidr16.length });
+    saveCache(parsed);
+    return parsed;
+  }
+
+  // ---- resolve public IP via ipify ----
+  async function getPublicIP() {
+    print("Resolving public IP via ipify.org");
+    const res = await afetch("https://api.ipify.org?format=json", { cache: "no-store" });
+    if (!res.ok) throw new Error("Failed to resolve public IP: HTTP " + res.status);
+    const data = await res.json();
+    const ip = normIP(data.ip);
+    print("Public IP resolved", { ip });
+    return ip;
+  }
+
+  // ---- main flow ----
+  async function run() {
+    const state = { ip: null, blacklisted: false, dest: null, error: null };
+    // expose for quick debug from console
+    try { window.__IP_BLACKLIST_DEBUG_STATE = state; } catch(e){}
+
+    try {
+      const [list, ip] = await Promise.all([getBlacklist(), getPublicIP()]);
+      state.ip = ip;
+
+      const blocked = isBlacklisted(ip, list);
+      state.blacklisted = blocked;
+
+      // signature log - always printed
+      printSignatureBlock(blocked
+        ? `BLOCKED: IP ${ip} termasuk blacklist`
+        : `NOT BLOCKED: IP ${ip} tidak ada di blacklist`
+      );
+
+      print("Decision", {
+        ip,
+        blacklisted: blocked,
+        sample: {
+          pure_example: (list.pure.size ? Array.from(list.pure).slice(0,5) : []),
+          cidr24_example: list.cidr24.slice(0,5),
+          cidr16_example: list.cidr16.slice(0,5)
+        }
+      });
+
+      if (blocked) {
+        const dest = mergeQuery(TARGET_URL);
+        state.dest = dest;
+        const here = location.href.split("#")[0];
+        const there = dest.split("#")[0];
+        if (here !== there) {
+          print("Redirecting (blacklisted)", { from: here, to: dest });
+          window.location.replace(dest);
+          return;
+        } else {
+          print("Already at target URL; skip redirect");
+        }
+      } else {
+        print("Stay on page (not blacklisted)");
+      }
+
+    } catch (e) {
+      state.error = (e && (e.stack || e.message)) || String(e);
+      print("ERROR during blacklist flow", e);
+      printSignatureBlock("ERROR: tidak bisa menentukan status blacklist (lihat console).");
+    }
+  }
+
+  // run after DOM ready
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", run);
+  } else {
+    run();
+  }
+
+})();
+</script>
