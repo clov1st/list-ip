@@ -1,0 +1,151 @@
+(async () => {
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+  // ===== UI texts (ID/EN) =====
+  const ADD_BTN_TEXTS = ["Tambahkan opsi teks","Tambahkan opsi lainnya","Add text option"];
+  const OPTION_LABEL_PAT = /(Masukkan opsi lain untuk teks|Enter another option for|Option|Opsi)/i;
+  const BASE_ARIA_PARTS = ["Beri tahu orang-orang","Tell people","Teks utama","Primary text"];
+
+  // ===== utils =====
+  const setTA = (() => {
+    const desc = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value");
+    return (el, val) => {
+      desc?.set ? desc.set.call(el, val) : (el.value = val);
+      el.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    };
+  })();
+
+  const nativeClick = (el) => {
+    ["pointerdown","mousedown","focus","pointerup","mouseup","click"].forEach(type => {
+      el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: (el.ownerDocument?.defaultView || window) }));
+    });
+  };
+
+  const waitCountChange = (root, getter, oldCount, timeout = 5000) => new Promise(resolve => {
+    const doc = root;
+    const obs = new MutationObserver(() => {
+      try { const n = getter(); if (n !== oldCount) { obs.disconnect(); clearTimeout(timer); resolve(true); } } catch {}
+    });
+    const timer = setTimeout(() => { obs.disconnect(); resolve(false); }, timeout);
+    obs.observe(doc, { childList: true, subtree: true });
+  });
+
+  // scan main doc + same-origin iframes
+  const getRoots = () => {
+    const roots = [document];
+    document.querySelectorAll("iframe").forEach(ifr => {
+      try { if (ifr.contentDocument) roots.push(ifr.contentDocument); } catch {}
+    });
+    return roots;
+  };
+
+  const findBaseEditor = (root) => {
+    for (const p of BASE_ARIA_PARTS) {
+      const el = root.querySelector(`div[contenteditable='true'][aria-label*='${p}']`);
+      if (el) return el;
+    }
+    return root.querySelector("div[contenteditable='true'][role='textbox'], div[contenteditable='true'], textarea");
+  };
+
+  const findAddButton = (root) => {
+    const candidates = Array.from(root.querySelectorAll("div[role='button'],button"))
+      .filter(b => ADD_BTN_TEXTS.some(t => (b.textContent || "").trim().includes(t)));
+    return candidates.at(-1) || null;
+  };
+
+  const findOptionTAs = (root, scope = null) => {
+    const container = scope || root;
+    const list = [];
+    container.querySelectorAll("div._9vo4, div[role='heading'], label").forEach(lbl => {
+      const tx = (lbl.innerText || "").trim();
+      if (OPTION_LABEL_PAT.test(tx)) {
+        const ta = lbl.parentElement?.querySelector("textarea");
+        if (ta) list.push(ta);
+      }
+    });
+    if (!list.length) container.querySelectorAll("textarea").forEach(ta => list.push(ta));
+    return Array.from(new Set(list));
+  };
+
+  // robust contenteditable setter (handle iframe + detach)
+  const setEditor = async (el, text) => {
+    if (!el) return false;
+    let doc = el.ownerDocument || document;
+    let win = doc.defaultView || window;
+
+    for (let tries = 0; tries < 4; tries++) {
+      if (!el.isConnected) {
+        const re = findBaseEditor(doc);
+        if (!re) return false;
+        el = re; doc = el.ownerDocument || document; win = doc.defaultView || window;
+        await new Promise(r => win.requestAnimationFrame(r));
+      }
+
+      if (el.tagName === "TEXTAREA") { setTA(el, text); return true; }
+
+      try {
+        el.focus();
+        await new Promise(r => win.requestAnimationFrame(r));
+        const sel = doc.getSelection();
+        const range = doc.createRange();
+        range.selectNodeContents(el);
+        sel.removeAllRanges();
+        sel.addRange(range);
+        doc.execCommand("delete", false, null);
+        if (!doc.execCommand("insertText", false, text)) el.textContent = text;
+        el.dispatchEvent(new InputEvent("input", { bubbles: true }));
+      } catch {
+        await sleep(60);
+        continue;
+      }
+
+      const cur = (el.innerText || el.textContent || "").trim();
+      if (cur === text) return true;
+      await sleep(80);
+    }
+    return false;
+  };
+
+  // ===== MAIN =====
+  // pilih root yang punya editor / add button / option boxes
+  let chosen = null;
+  for (const root of getRoots()) {
+    const base = findBaseEditor(root);
+    const addBtn = findAddButton(root);
+    const opts = findOptionTAs(root);
+    if (base || addBtn || opts.length) { chosen = { root, base, addBtn }; break; }
+  }
+  if (!chosen) { console.warn("Panel 'Teks utama' tidak ditemukan. Pastikan sudah dibuka/terlihat."); return; }
+
+  const { root } = chosen;
+
+  // 1) Pastikan ada 4 opsi
+  for (;;) {
+    const before = findOptionTAs(root).length;
+    if (before >= 4) break;
+    const btn = findAddButton(root);
+    if (!btn) break;
+    nativeClick(btn);
+    await waitCountChange(root, () => findOptionTAs(root).length, before, 4000);
+    await sleep(120);
+  }
+
+  // 2) Isi opsi 2..5 terlebih dahulu
+  const values = ["primary text auto 2","primary text auto 3","primary text auto 4","primary text auto 5"];
+  const tas = findOptionTAs(root).slice(0, 4);
+  for (let i = 0; i < tas.length; i++) {
+    for (let r = 0; r < 3; r++) {
+      setTA(tas[i], values[i]);
+      await sleep(80);
+      if ((tas[i].value || "").trim() === values[i]) break;
+      await sleep(120);
+    }
+  }
+
+  // 3) Terakhir: isi Primary (1)
+  let base = chosen.base || findBaseEditor(root);
+  if (base) await setEditor(base, "primary text auto 1");
+
+  const baseFilled = base ? (base.tagName === "TEXTAREA" ? base.value : (base.innerText || base.textContent || "")).trim() : "(missing)";
+  console.log("✅ Selesai:", { base: baseFilled, opsi: tas.map(t => t.value), rootType: root === document ? "main" : "iframe" });
+})();
