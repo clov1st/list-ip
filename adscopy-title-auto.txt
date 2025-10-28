@@ -1,0 +1,108 @@
+(async () => {
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+  // === teks UI yang mungkin muncul ===
+  const ADD_BTN_TEXTS = ["Tambahkan opsi judul","Add headline option"];
+  const OPTION_LABEL_PAT = /(Masukkan opsi lain untuk judul|Enter another option for|Option|Opsi)/i;
+  const BASE_LABEL_PARTS = ["Tulis judul yang singkat","Headline","Judul"];
+
+  // === util dasar ===
+  const setTA = (() => {
+    const desc = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,"value");
+    return (el,val)=>{ desc?.set ? desc.set.call(el,val) : (el.value=val); el.dispatchEvent(new InputEvent("input",{bubbles:true})); };
+  })();
+
+  const nativeClick = (el) => {
+    ["pointerdown","mousedown","focus","pointerup","mouseup","click"].forEach(type=>{
+      el.dispatchEvent(new MouseEvent(type,{bubbles:true,cancelable:true,view:window}));
+    });
+  };
+
+  const waitCountChange = (root, getter, oldCount, timeout=5000) => new Promise(resolve=>{
+    const obs = new MutationObserver(() => {
+      try { const n = getter(); if (n !== oldCount) { obs.disconnect(); clearTimeout(timer); resolve(true); } } catch {}
+    });
+    const timer = setTimeout(()=>{ obs.disconnect(); resolve(false); }, timeout);
+    obs.observe(root, {childList:true, subtree:true});
+  });
+
+  // === jelajahi semua same-origin roots (document + iframes) ===
+  const getRoots = () => {
+    const roots = [document];
+    document.querySelectorAll("iframe").forEach(ifr => {
+      try { if (ifr.contentDocument) roots.push(ifr.contentDocument); } catch {}
+    });
+    return roots;
+  };
+
+  const findBaseTitle = (root) => {
+    for (const t of BASE_LABEL_PARTS) {
+      const el = [...root.querySelectorAll("div._9vo4")]
+        .find(e => (e.innerText||"").trim().includes(t));
+      if (el) {
+        const ta = el.parentElement?.querySelector("textarea");
+        if (ta) return ta;
+      }
+    }
+    return null;
+  };
+
+  const findAddButton = (root) => {
+    const candidates = Array.from(root.querySelectorAll("div[role='button'],button"))
+      .filter(b => ADD_BTN_TEXTS.some(t => (b.textContent||"").trim().includes(t)));
+    return candidates.at(-1) || null;
+  };
+
+  const findOptionTAs = (root, scope=null) => {
+    const container = scope || root;
+    const list = [];
+    container.querySelectorAll("div._9vo4, div._9voc._9vod").forEach(lbl=>{
+      const tx = (lbl.innerText||"").trim();
+      if (OPTION_LABEL_PAT.test(tx)) {
+        const ta = lbl.parentElement?.querySelector("textarea");
+        if (ta) list.push(ta);
+      }
+    });
+    if (!list.length) container.querySelectorAll("textarea").forEach(ta=>list.push(ta));
+    return Array.from(new Set(list));
+  };
+
+  // === MAIN ===
+  let chosen = null;
+  for (const root of getRoots()) {
+    const base = findBaseTitle(root);
+    const addBtn = findAddButton(root);
+    const opts = findOptionTAs(root);
+    if (base || addBtn || opts.length) { chosen = {root, base, addBtn}; break; }
+  }
+  if (!chosen) { console.warn("Panel 'Judul' tidak ditemukan. Pastikan sudah dibuka/terlihat."); return; }
+
+  const {root} = chosen;
+
+  // === FASE 1: pastikan ada 4 opsi ===
+  for (;;) {
+    const before = findOptionTAs(root).length;
+    if (before >= 4) break;
+    const btn = findAddButton(root);
+    if (!btn) break;
+    nativeClick(btn);
+    await waitCountChange(root, ()=>findOptionTAs(root).length, before, 4000);
+    await sleep(120);
+  }
+
+  // === FASE 2: isi base + opsi ===
+  const baseTA = chosen.base || findBaseTitle(root);
+  const values = ["title auto 2","title auto 3","title auto 4","title auto 5"];
+  const tas = findOptionTAs(root).slice(0,4);
+
+  // isi base terakhir agar tak terhapus binding internal
+  for (let i=0;i<tas.length;i++){
+    setTA(tas[i], values[i]);
+    await sleep(100);
+  }
+
+  if (baseTA) setTA(baseTA,"title auto 1");
+
+  const baseFilled = baseTA ? baseTA.value.trim() : "(missing)";
+  console.log("✅ Selesai isi Judul:", { base: baseFilled, opsi: tas.map(t=>t.value), rootType: root===document?"main":"iframe" });
+})();
